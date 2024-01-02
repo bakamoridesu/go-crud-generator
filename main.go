@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -21,7 +23,7 @@ type StructInfo struct {
 var structMap = make(map[string]StructInfo)
 var packageDefinition string // Define a global variable to store package definition
 
-func generateJSONNotation(structString string) (string, error) {
+func generateCRUD(structString string) (string, error) {
 	// Remove the package definition and trim whitespace
 	structString = removePackageDefinition(structString)
 	structString = strings.TrimSpace(structString)
@@ -33,7 +35,7 @@ func generateJSONNotation(structString string) (string, error) {
 	finalOutput += "\t\"encoding/json\"\n"
 	finalOutput += "\t\"net/http\"\n"
 	finalOutput += "\t\"os\"\n"
-	finalOutput += "\t\"strings\"\n"
+	finalOutput += "\t\"fmt\"\n"
 	finalOutput += ")"
 
 	// Regular expression to match multiple struct definitions in the input string
@@ -89,6 +91,7 @@ func generateJSONNotation(structString string) (string, error) {
 		resultStrings = append(resultStrings, generateCRUDOperations(*mainStruct))
 	}
 
+	resultStrings = append(resultStrings, generateRootHandler(*mainStruct))
 	return strings.Join(resultStrings, "\n\n"), nil
 }
 
@@ -125,6 +128,37 @@ func removePackageDefinition(structString string) string {
 	// Remove the package definition from the structString
 	modifiedStructString := re.ReplaceAllString(structString, "")
 	return modifiedStructString
+}
+
+func generateRootHandler(mainStruct StructInfo) string {
+	// Capitalize the first letter of the main data type name
+	mainTypeName := capitalizeFirstLetter(mainStruct.Name)
+
+	rootHandler := `
+func ` + mainTypeName + `Handler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		Read` + mainTypeName + `(w, r)
+	case http.MethodPost:
+		Create` + mainTypeName + `(w, r)
+	case http.MethodPut:
+		Update` + mainTypeName + `(w, r)
+	case http.MethodDelete:
+		Delete` + mainTypeName + `(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+`
+	return rootHandler
+}
+
+func capitalizeFirstLetter(s string) string {
+	if s == "" {
+		return s
+	}
+	firstLetter := strings.ToUpper(string(s[0]))
+	return firstLetter + s[1:]
 }
 
 func generateCRUDOperations(mainStruct StructInfo) string {
@@ -166,7 +200,7 @@ func generateSaveToJSONFunction(structName string) string {
 	saveFunc += "\tif err != nil {\n"
 	saveFunc += "\t\treturn err\n"
 	saveFunc += "\t}\n\n"
-	saveFunc += "\terr := os.WriteFile(filename, jsonData, 0644)\n"
+	saveFunc += "\terr = os.WriteFile(filename, jsonData, 0644)\n"
 	saveFunc += "\tif err != nil {\n"
 	saveFunc += "\t\treturn err\n"
 	saveFunc += "\t}\n\n"
@@ -189,7 +223,7 @@ func generateHTTPCreateHandler(mainStruct StructInfo) string {
 	createLogic += "\t\treturn\n"
 	createLogic += "\t}\n\n"
 	createLogic += "\t// Code to save the newData to the dataMap\n"
-	createLogic += "\tdataMap[newData." + mainStruct.IDField + "] = newData\n"
+	createLogic += "\tdataMap[fmt.Sprint(newData." + mainStruct.IDField + ")] = newData\n"
 	createLogic += "\terr = saveToJSONFile(\"" + strings.ToLower(mainStruct.Name) + ".json\")\n\n"
 	createLogic += "\tif err != nil {\n"
 	createLogic += "\t\tw.WriteHeader(http.StatusInternalServerError)\n"
@@ -245,12 +279,13 @@ func generateHTTPUpdateHandler(mainStruct StructInfo) string {
 	updateLogic += "\t\treturn\n"
 	updateLogic += "\t}\n\n"
 	updateLogic += "\t// Code to update the record in the dataMap\n"
-	updateLogic += "\t// dataMap[updatedData." + mainStruct.IDField + "] = updatedData\n"
+	updateLogic += "\tdataMap[fmt.Sprint(updatedData." + mainStruct.IDField + ")] = updatedData\n"
 	updateLogic += "\terr = saveToJSONFile(\"" + strings.ToLower(mainStruct.Name) + ".json\")\n\n"
 	updateLogic += "\tif err != nil {\n"
 	updateLogic += "\t\tw.WriteHeader(http.StatusInternalServerError)\n"
 	updateLogic += "\t\t// Handle error appropriately, e.g., log the error\n"
 	updateLogic += "\t\treturn\n"
+	updateLogic += "}\t\n"
 	updateLogic += "\tw.WriteHeader(http.StatusOK)\n"
 	updateLogic += "}\n"
 
@@ -270,7 +305,7 @@ func generateHTTPDeleteHandler(mainStruct StructInfo) string {
 	deleteLogic += "\t\treturn\n"
 	deleteLogic += "\t}\n\n"
 	deleteLogic += "\t// Code to delete the record from the dataMap using the extracted 'id'\n"
-	deleteLogic += "\t// delete(dataMap, id)\n"
+	deleteLogic += "\tdelete(dataMap, id)\n"
 	deleteLogic += "\terr := saveToJSONFile(\"" + strings.ToLower(mainStruct.Name) + ".json\")\n\n"
 	deleteLogic += "\tif err != nil {\n"
 	deleteLogic += "\t\tw.WriteHeader(http.StatusInternalServerError)\n"
@@ -283,8 +318,41 @@ func generateHTTPDeleteHandler(mainStruct StructInfo) string {
 	return deleteLogic
 }
 
+func run(filename string) error {
+
+	if filename == "" {
+		return fmt.Errorf("a file name is required")
+	}
+
+	f, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+
+	crudContent, err := generateCRUD(string(f))
+	if err != nil {
+		return err
+	}
+
+	out, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	out.WriteString(crudContent)
+	return nil
+}
+
 func main() {
 	// Example input string containing package and struct definitions with spaces and newlines
+	file := flag.String("file", "", "File to format")
+	flag.Parse()
+
+	if err := run(*file); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	structsString := `
 		package main
 		
@@ -300,7 +368,7 @@ func main() {
 		}
 	`
 
-	jsonStructs, err := generateJSONNotation(structsString)
+	jsonStructs, err := generateCRUD(structsString)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
